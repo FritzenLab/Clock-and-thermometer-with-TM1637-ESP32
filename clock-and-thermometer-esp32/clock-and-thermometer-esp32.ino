@@ -1,3 +1,4 @@
+// Board user: ESP32-C3 Super mini https://fritzenlab.net/fritzenlab-esp32-c3-super-mini-dev-board/
 #include "secrets.h"
 #include <Arduino.h>
 #include <TM1637Display.h>
@@ -24,9 +25,10 @@ const char* timekey = TIMEZONEDB_API_KEY;
 const char* mycity = MY_CITY;
 
 // IO naming
-#define CLK 3
-#define DIO 4
-#define lm35 2
+#define CLK 1 // GPIO 1 pin 15
+#define DIO 2 // GPIO 2 pin 14
+#define lm35 0 // A0 pin 16
+// On my version of the ESP32C3 Super mini: 10 GND and 11 3V3
 
 const uint8_t cletter[] = {
 	SEG_A | SEG_D | SEG_E | SEG_F            //Letter 'C'
@@ -76,6 +78,7 @@ MovingAverage avglm35(20);
 
 void setup() {
   analogReadResolution(10);
+  analogSetAttenuation(ADC_0db);
   display.clear();
   display.setBrightness(0x0f);
   Serial.begin(115200); 
@@ -122,9 +125,23 @@ void loop() {
     //Serial.println(currentMinute);
     Serial.println(combinedTime);
 
+    }else if(sweepcounter == 25){
+      // Backup reconnect check: WiFi.setAutoReconnect() usually handles
+      // drops on its own, but can occasionally get stuck (e.g. after a
+      // long outage or router reboot). This forces a fresh attempt if
+      // still disconnected.
+      // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wifi.html
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.println(F("WiFi disconnected, attempting reconnect..."));
+        WiFi.disconnect();
+        WiFi.begin(ssid, password);
+      }
+
     }else if(sweepcounter == 50){
       
-      tempcelsius= analogRead(lm35) * 3.3 / 1023 * 100;
+      //tempcelsius= analogRead(lm35) * 3.37 / 1023 * 100; // old way of reading the sensor
+      int mv = analogReadMilliVolts(lm35); // new way of reading the sensor
+      tempcelsius = mv / 10; // LM35: 10mV per °C
       smoothlm35 = avglm35.update(tempcelsius);
       Serial.println(smoothlm35);
       display.showNumberDecEx(smoothlm35, false, 0, 2, 0);
@@ -162,6 +179,11 @@ void getTime() {
       if (!err) {
         const char* datetime = doc["formatted"];
 
+        Serial.print(F("Raw formatted: "));
+        Serial.println(datetime);
+        Serial.print(F("Free heap: "));
+        Serial.println(ESP.getFreeHeap());
+
         char dateBuf[11];
         char hourBuf[3];
         char minBuf[3];
@@ -179,6 +201,9 @@ void getTime() {
         currentHour = atoi(hourBuf);
         currentMinute = atoi(minBuf);
 
+        Serial.println(currentDate);
+        Serial.println(currentHour);
+        Serial.println(currentMinute);
         // Derive weekday name from currentDate ("YYYY-MM-DD").
         // https://cplusplus.com/reference/ctime/tm/
         struct tm dowInfo = {0};
@@ -200,6 +225,7 @@ void getTime() {
     }
 
     http.end();
+    client.stop();
   }
 }
 
@@ -208,6 +234,11 @@ bool connectSavedWiFi() {
   // reading from Preferences. The web-based provisioning flow (handleConnect,
   // WebServer routes) was never wired up, so prefs always came back empty.
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false); // reduces current spikes during association — known
+                         // workaround for brownout resets on ESP32-C3 boards
+                         // with weak onboard regulators (e.g. Super Mini)
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
   WiFi.begin(ssid, password);
 
   Serial.print("Connecting");
