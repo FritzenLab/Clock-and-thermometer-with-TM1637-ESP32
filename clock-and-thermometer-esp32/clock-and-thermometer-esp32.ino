@@ -115,7 +115,8 @@ void loop() {
       getTime();
     }
     
-    sprintf(timeStr, "%d%d", currentHour, currentMinute); 
+    sprintf(timeStr, "%02d%02d", currentHour, currentMinute); // %02d so that minutes or hours smaller
+    // than 10 will have the zero added to the left
     int combinedTime = atol(timeStr); 
     display.showNumberDecEx(combinedTime, 0, true, 4, 0);
     uint8_t colonDigit[] = { (uint8_t)(display.encodeDigit(currentHour % 10) | 0x80) };
