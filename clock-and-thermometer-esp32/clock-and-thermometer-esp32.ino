@@ -34,7 +34,7 @@ const uint8_t cletter[] = {
 	SEG_A | SEG_D | SEG_E | SEG_F            //Letter 'C'
 	};
 const uint8_t degrees[] = {
-  SEG_A | SEG_B | SEG_F | SEG_G            //Symbol º
+  SEG_A | SEG_B | SEG_F | SEG_G            //Symbol 'º'
 };
 
 TM1637Display display(CLK, DIO);
