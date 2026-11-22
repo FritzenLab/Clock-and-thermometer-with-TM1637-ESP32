@@ -20,7 +20,7 @@ const char* mytz = "<-03>3"; // my time zone
 // IO naming
 #define CLK 1 // GPIO 1 pin 15
 #define DIO 2 // GPIO 2 pin 14
-#define lm35 0 // A0 pin 16
+#define lm35 4 // GPIO 4 pin A2
 // On my version of the ESP32C3 Super mini: 10 GND and 11 3V3
 
 const uint8_t cletter[] = {
@@ -28,6 +28,9 @@ const uint8_t cletter[] = {
 	};
 const uint8_t degrees[] = {
   SEG_A | SEG_B | SEG_F | SEG_G            //Symbol 'º'
+};
+const uint8_t dash[] = {
+  SEG_G            //Symbol '-'
 };
 
 TM1637Display display(CLK, DIO);
@@ -97,7 +100,10 @@ void setup() {
     } else {
       Serial.println("NTP sync timed out");
     }
-  } 
+  }else{
+    display.setSegments(dash, 1, 1); //Symbol '-'
+    display.setSegments(dash, 1, 2); //Symbol '-'
+  }
 }
 
 void loop() {
@@ -131,6 +137,8 @@ void loop() {
         Serial.println(F("WiFi disconnected, attempting reconnect..."));
         WiFi.disconnect();
         WiFi.begin(ssid, password);
+        display.setSegments(dash, 1, 1); //Symbol '-'
+        display.setSegments(dash, 1, 2); //Symbol '-'
       }
 
     }else if(sweepcounter == 50){
