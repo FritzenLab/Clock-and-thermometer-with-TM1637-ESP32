@@ -3,6 +3,9 @@
 #include <Arduino.h>
 #include <TM1637Display.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <WiFiUdp.h>
 
 int tempcelsius;
 int zero = 12;
@@ -32,6 +35,12 @@ const uint8_t degrees[] = {
 const uint8_t dash[] = {
   SEG_G            //Symbol '-'
 };
+const uint8_t lettera[] = {
+  SEG_A | SEG_B | SEG_C | SEG_E | SEG_F | SEG_G           //Letter 'A'
+};
+const uint8_t letterp[] = {
+  SEG_A | SEG_B | SEG_E | SEG_F | SEG_G           //Letter 'P'
+};
 
 TM1637Display display(CLK, DIO);
 
@@ -39,6 +48,18 @@ long currenttime;
 long oldtime= 0;
 int sweepcounter;
 int lastcounter;
+const char* networkName   = "myClock";
+bool portalRunning     = false;
+// HTTP server on port 80, used by the configuration portal
+// https://github.com/espressif/arduino-esp32/tree/master/libraries/WebServer
+WebServer server(80);
+
+// Non-volatile key-value storage; keeps the Wi-Fi credentials across reboots
+// https://docs.espressif.com/projects/arduino-esp32/en/latest/api/preferences.html
+Preferences prefs;
+
+String apIP;                  // filled in by startAPPortal()
+String savedSsid, savedPass;  // credentials in use, loaded in connectSavedWiFi()
 
 class MovingAverage {
   private:
@@ -103,11 +124,18 @@ void setup() {
   }else{
     display.setSegments(dash, 1, 1); //Symbol '-'
     display.setSegments(dash, 1, 2); //Symbol '-'
+    startAPPortal();    
   }
 }
 
 void loop() {
-
+  if (portalRunning) {
+    server.handleClient();    
+    delay(100);
+    display.setSegments(lettera, 1, 1); //Letter 'A'
+    display.setSegments(letterp, 1, 2); //Letter 'P'
+    return;
+  }
   currenttime= micros();
   if(currenttime - oldtime >= 100000){
     oldtime= micros();
@@ -136,7 +164,7 @@ void loop() {
       if (WiFi.status() != WL_CONNECTED) {
         Serial.println(F("WiFi disconnected, attempting reconnect..."));
         WiFi.disconnect();
-        WiFi.begin(ssid, password);
+        WiFi.begin(savedSsid.c_str(), savedPass.c_str());
         display.setSegments(dash, 1, 1); //Symbol '-'
         display.setSegments(dash, 1, 2); //Symbol '-'
       }
@@ -201,12 +229,22 @@ bool connectSavedWiFi() {
                          // with weak onboard regulators (e.g. Super Mini)
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
-  WiFi.begin(ssid, password);
+  // Use the credentials saved by the portal; fall back to the hardcoded ones
+  // from secrets.h on first boot. Read-write mode creates the namespace if it
+  // doesn't exist yet (read-only would log an error on first boot).
+  // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/preferences.html
+  prefs.begin("wifi", false);
+  savedSsid = prefs.getString("ssid", ssid);
+  savedPass = prefs.getString("pass", password);
+  prefs.end();
+  WiFi.begin(savedSsid.c_str(), savedPass.c_str());
 
   Serial.print("Connecting");
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    display.setSegments(dash, 1, 1); //Symbol '-'
+    display.setSegments(dash, 1, 2); //Symbol '-'
     Serial.print(".");
     delay(500);
   }
@@ -218,4 +256,159 @@ bool connectSavedWiFi() {
   }
 
   return false;
+}
+// Escapes characters that would break the HTML if present in an SSID
+String htmlEscape(String s) {
+  s.replace("&", "&amp;");  // must come first
+  s.replace("<", "&lt;");
+  s.replace("\"", "&quot;");
+  return s;
+}
+
+// Scans for networks and returns them as <option> tags for the <datalist> in makePage()
+String buildSSIDOptions() {
+  // Blocking scan (a few seconds). Returns the number of networks found, or a
+  // negative value on failure (the loop then simply doesn't run).
+  // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wifi.html
+  int n = WiFi.scanNetworks();
+  String options = "";
+  for (int i = 0; i < n; i++) {
+    String name = htmlEscape(WiFi.SSID(i));
+    if (name.length() == 0) continue;  // hidden networks report an empty SSID
+    options += "<option value=\"" + name + "\">" + name + "</option>";
+  }
+  WiFi.scanDelete();  // frees the memory used by the scan results
+  return options;
+}
+
+// Builds the configuration page. The SSID field is a text input with a
+// suggestion list, so the network can be picked or typed (e.g. hidden networks).
+// https://developer.mozilla.org/en-US/docs/Web/HTML/Element/datalist
+String makePage(const String& options) {
+  return String(R"rawliteral(
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Clock Wi-Fi setup</title>
+    <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f2f4f8;
+      margin: 0;
+      padding: 0;
+    }
+    .container {
+      max-width: 380px;
+      margin: 40px auto;
+      background: white;
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+    }
+    h2 {
+      text-align: center;
+      margin-bottom: 20px;
+      color: #333;
+    }
+    label {
+      font-weight: bold;
+      font-size: 14px;
+    }
+    select, input[type=password] {
+      width: 100%;
+      padding: 12px;
+      margin-top: 6px;
+      margin-bottom: 16px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      font-size: 16px;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      background: #2e86de;
+      color: white;
+      font-size: 16px;
+      font-weight: bold;
+    }
+    button:active {
+      background: #1b4f72;
+    }
+    .footer {
+      text-align: center;
+      margin-top: 14px;
+      font-size: 12px;
+      color: #777;
+    }
+    </style>
+    </head>
+    <body>
+    <div class="container">
+    <h2>Configure WiFi</h2>
+    <form action="/connect" method="POST">
+    <label>Network</label>
+    <select name="ssid">
+  )rawliteral") + options + R"rawliteral(
+    </select>
+    <label>Password</label>
+    <input type="password" name="pass" placeholder="Enter WiFi password">
+    <button type="submit">Connect</button>
+    </form>
+    <div class="footer">
+    ESP32 Setup Portal
+    </div>
+    </div>
+    </body>
+    </html>
+  )rawliteral";
+}
+void handleRoot() {
+  String options = buildSSIDOptions();
+  String page = makePage(options);
+  server.send(200, "text/html", page);
+}
+
+void handleConnect() {
+  if (!server.hasArg("ssid") || !server.hasArg("pass")) {
+    server.send(400, "text/plain", "Missing SSID or password");
+    return;
+  }
+
+  String newSSID = server.arg("ssid");
+  String newPASS = server.arg("pass");
+
+  prefs.begin("wifi", false);
+  prefs.putString("ssid", newSSID);
+  prefs.putString("pass", newPASS);
+  prefs.end();
+
+  server.send(200, "text/plain", "Saved. Device will reboot and connect.");
+  delay(1000);
+  ESP.restart();
+}
+void startAPPortal() {
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP_STA);
+  // softAP() returns false if the AP could not be started
+  // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wifi.html
+  bool apOk = WiFi.softAP(networkName);
+  Serial.println(apOk ? "softAP OK" : "softAP FAILED");
+
+  // Known ESP32-C3 Super Mini issue: at full TX power, stations can fail to
+  // associate. The Wi-Fi must already be started, hence after softAP().
+  // https://forum.arduino.cc/t/no-wifi-connect-with-esp32-c3-super-mini/1324046/13
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  IPAddress IP = WiFi.softAPIP();
+  apIP = IP.toString();
+  Serial.print("AP started. IP: ");
+  Serial.println(IP);
+
+  server.on("/", handleRoot);
+  server.on("/connect", HTTP_POST, handleConnect);
+  server.begin();
+  portalRunning = true;
 }
