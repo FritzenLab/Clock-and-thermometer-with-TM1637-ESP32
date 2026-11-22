@@ -3,26 +3,19 @@
 #include <Arduino.h>
 #include <TM1637Display.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
 
 int tempcelsius;
 int zero = 12;
 int smoothlm35;
 char timeStr[12];
-int retrieveTime = 0;
 int currentHour;
 int currentMinute;
 String currentDate;
 String currentDayOfWeek;
 
-WiFiClientSecure client;   // used by http.begin(client, url) for HTTPS
-
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
-const char* timekey = TIMEZONEDB_API_KEY;
-const char* mycity = MY_CITY;
+const char* mytz = "<-03>3"; // my time zone
 
 // IO naming
 #define CLK 1 // GPIO 1 pin 15
@@ -50,6 +43,7 @@ class MovingAverage {
     uint32_t *_readings;     
     int _readIndex = 0;
     uint32_t _total = 0;   
+    int _count = 0;
 
   public:
     MovingAverage(int size) {
@@ -70,7 +64,12 @@ class MovingAverage {
       _readIndex++;
       if (_readIndex >= _numReadings) _readIndex = 0;
 
-      return _total / _numReadings; 
+      // Count real samples until the buffer is full, so early averages are
+      // divided by the samples we actually have instead of by 20 slots
+      // that are still zero.
+      if (_count < _numReadings) _count++;
+
+      return _total / _count;
     }
 };
 
@@ -84,21 +83,21 @@ void setup() {
   Serial.begin(115200); 
   
   Serial.println("[SETUP] WiFi conectado!");
-  // Skips TLS certificate validation for WiFiClientSecure. Required or the
-  // HTTPS handshake to api.timezonedb.com fails silently before any HTTP
-  // response is even received.
-  // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wificlientsecure.html
-  client.setInsecure();
+  
+  if (connectSavedWiFi()) {
+    getTime();  // starts SNTP the first time it runs (see getTime)
 
-  if (connectSavedWiFi()) {   
-
-    configTime(0, 0, "pool.ntp.org");
-    //Serial.println("Waiting for time sync...");
-    time_t now = time(nullptr);
-    now = time(nullptr);
-    Serial.println("\nTime synced!");
-    getTime();    
-  }  
+    // getLocalTime() with a timeout waits for the first SNTP sync, so the
+    // display starts with the right time. Returns false if it times out.
+    // https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Time/SimpleTime/SimpleTime.ino
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 10000)) {
+      Serial.println("\nTime synced!");
+      getTime();
+    } else {
+      Serial.println("NTP sync timed out");
+    }
+  } 
 }
 
 void loop() {
@@ -109,11 +108,7 @@ void loop() {
     sweepcounter++;
     
     if(sweepcounter == 1){
-    retrieveTime++;
-    if(retrieveTime > 5){
-      retrieveTime = 0;
       getTime();
-    }
     
     sprintf(timeStr, "%02d%02d", currentHour, currentMinute); // %02d so that minutes or hours smaller
     // than 10 will have the zero added to the left
@@ -158,76 +153,34 @@ void loop() {
   }
 }
 void getTime() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  String url = "https://api.timezonedb.com/v2.1/get-time-zone?key=" + String(timekey) + "&format=json&by=zone&zone=" + String(mycity);
-
-  HTTPClient http;
-
-  if (http.begin(client, url)) {
-    http.setReuse(false);
-
-    int httpCode = http.GET();
-    /*Serial.print("HTTP code time: ");
-    Serial.println(httpCode);*/
-
-    if (httpCode == 200) {
-      DynamicJsonDocument doc(512);
-      String payload = http.getString();  // pulls everything fast
-      yield();
-
-      DeserializationError err = deserializeJson(doc, payload);
-
-      if (!err) {
-        const char* datetime = doc["formatted"];
-
-        Serial.print(F("Raw formatted: "));
-        Serial.println(datetime);
-        Serial.print(F("Free heap: "));
-        Serial.println(ESP.getFreeHeap());
-
-        char dateBuf[11];
-        char hourBuf[3];
-        char minBuf[3];
-
-        strncpy(dateBuf, datetime, 10);
-        dateBuf[10] = '\0';
-
-        strncpy(hourBuf, datetime + 11, 2);
-        hourBuf[2] = '\0';
-
-        strncpy(minBuf, datetime + 14, 2);
-        minBuf[2] = '\0';
-
-        currentDate = String(dateBuf);
-        currentHour = atoi(hourBuf);
-        currentMinute = atoi(minBuf);
-
-        Serial.println(currentDate);
-        Serial.println(currentHour);
-        Serial.println(currentMinute);
-        // Derive weekday name from currentDate ("YYYY-MM-DD").
-        // https://cplusplus.com/reference/ctime/tm/
-        struct tm dowInfo = {0};
-        dowInfo.tm_year = currentDate.substring(0, 4).toInt() - 1900;
-        dowInfo.tm_mon  = currentDate.substring(5, 7).toInt() - 1;
-        dowInfo.tm_mday = currentDate.substring(8, 10).toInt();
-        dowInfo.tm_hour = 12;  // noon avoids DST/timezone edge cases
-
-        // mktime() fills in tm_wday (0=Sunday..6=Saturday) as a side effect.
-        // https://cplusplus.com/reference/ctime/mktime/
-        mktime(&dowInfo);
-
-        // %A = full weekday name, locale-dependent (default "C" locale = English).
-        // https://cplusplus.com/reference/ctime/strftime/
-        char dowBuf[10];
-        strftime(dowBuf, sizeof(dowBuf), "%A", &dowInfo);
-        currentDayOfWeek = String(dowBuf);
-      }
-    }
-
-    http.end();
-    client.stop();
+  // Start SNTP once, as soon as Wi-Fi is up. Doing it here (not only in setup)
+  // also covers Wi-Fi being down at boot and coming back later. Starting SNTP
+  // before the Wi-Fi stack is running can crash with "Invalid mbox".
+  // https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Time/SimpleTime/SimpleTime.ino
+  static bool ntpStarted = false;
+  if (!ntpStarted && WiFi.status() == WL_CONNECTED) {
+    configTzTime(mytz, "pool.ntp.org");
+    ntpStarted = true;
   }
+
+  // Only reads the system clock, no network traffic. Timeout 0 = don't wait;
+  // returns false until the first sync has happened.
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 0)) return;
+
+  currentHour = timeinfo.tm_hour;
+  currentMinute = timeinfo.tm_min;
+
+  // Same "YYYY-MM-DD" format as before, so the rest of the code is unaffected.
+  // https://cplusplus.com/reference/ctime/strftime/
+  char dateBuf[11];
+  strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &timeinfo);
+  currentDate = String(dateBuf);
+
+  // %A = full weekday name (English in the default "C" locale).
+  char dowBuf[10];
+  strftime(dowBuf, sizeof(dowBuf), "%A", &timeinfo);
+  currentDayOfWeek = String(dowBuf);
 }
 
 bool connectSavedWiFi() {
