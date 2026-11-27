@@ -138,18 +138,17 @@ void loop() {
     static unsigned long lastTry = 0;
     display.setSegments(lettera, 1, 1); //Letter 'A'
     display.setSegments(letterp, 1, 2); //Letter 'P'
-
+    if (WiFi.status() == WL_CONNECTED) {
+      portalRunning = false;
+      server.stop();
+      return;
+    }
     if (millis() - lastTry > 30000) {
       lastTry = millis();
 
+      WiFi.disconnect();
       WiFi.begin(savedSsid.c_str(), savedPass.c_str());
-
-      if (WiFi.waitForConnectResult() == WL_CONNECTED) {
-          portalRunning = false;
-          server.stop();
-      }
     }
-
     server.handleClient();
     return;
   }
@@ -267,7 +266,7 @@ bool connectSavedWiFi() {
   //Serial.print("Connecting");
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
     display.setSegments(dash, 1, 1); //Symbol '-'
     display.setSegments(dash, 1, 2); //Symbol '-'
     //Serial.print(".");
