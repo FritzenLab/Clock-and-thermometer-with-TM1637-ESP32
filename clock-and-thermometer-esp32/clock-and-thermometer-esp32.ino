@@ -7,7 +7,7 @@
 #include <Preferences.h>
 #include <WiFiUdp.h>
 
-int tempcelsius;
+float tempcelsius;
 int zero = 12;
 int smoothlm35;
 char timeStr[12];
@@ -44,8 +44,8 @@ const uint8_t letterp[] = {
 
 TM1637Display display(CLK, DIO);
 
-long currenttime;
-long oldtime= 0;
+unsigned long currenttime;
+unsigned long oldtime = 0;
 int sweepcounter;
 int lastcounter;
 const char* networkName   = "myClock";
@@ -104,9 +104,14 @@ void setup() {
   analogSetAttenuation(ADC_0db);
   display.clear();
   display.setBrightness(0x0f);
-  Serial.begin(115200); 
+  //Serial.begin(115200); 
   
-  Serial.println("[SETUP] WiFi conectado!");
+  //Serial.println("[SETUP] WiFi conectado!");
+  for (int i = 0; i < 3; i++) {
+    if (connectSavedWiFi()) return;
+
+    delay(5000);
+  }
   
   if (connectSavedWiFi()) {
     getTime();  // starts SNTP the first time it runs (see getTime)
@@ -116,10 +121,10 @@ void setup() {
     // https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Time/SimpleTime/SimpleTime.ino
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 10000)) {
-      Serial.println("\nTime synced!");
+      //Serial.println("\nTime synced!");
       getTime();
     } else {
-      Serial.println("NTP sync timed out");
+      //Serial.println("NTP sync timed out");
     }
   }else{
     display.setSegments(dash, 1, 1); //Symbol '-'
@@ -130,10 +135,22 @@ void setup() {
 
 void loop() {
   if (portalRunning) {
-    server.handleClient();    
-    delay(100);
+    static unsigned long lastTry = 0;
     display.setSegments(lettera, 1, 1); //Letter 'A'
     display.setSegments(letterp, 1, 2); //Letter 'P'
+
+    if (millis() - lastTry > 30000) {
+      lastTry = millis();
+
+      WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+
+      if (WiFi.waitForConnectResult() == WL_CONNECTED) {
+          portalRunning = false;
+          server.stop();
+      }
+    }
+
+    server.handleClient();
     return;
   }
   currenttime= micros();
@@ -151,9 +168,9 @@ void loop() {
     uint8_t colonDigit[] = { (uint8_t)(display.encodeDigit(currentHour % 10) | 0x80) };
     display.setSegments(colonDigit, 1, 1);
 
-    //Serial.println(currentHour);
-    //Serial.println(currentMinute);
-    Serial.println(combinedTime);
+    ////Serial.println(currentHour);
+    ////Serial.println(currentMinute);
+    //Serial.println(combinedTime);
 
     }else if(sweepcounter == 25){
       // Backup reconnect check: WiFi.setAutoReconnect() usually handles
@@ -162,7 +179,7 @@ void loop() {
       // still disconnected.
       // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wifi.html
       if (WiFi.status() != WL_CONNECTED) {
-        Serial.println(F("WiFi disconnected, attempting reconnect..."));
+        //Serial.println(F("WiFi disconnected, attempting reconnect..."));
         WiFi.disconnect();
         WiFi.begin(savedSsid.c_str(), savedPass.c_str());
         display.setSegments(dash, 1, 1); //Symbol '-'
@@ -173,10 +190,18 @@ void loop() {
       
       //tempcelsius= analogRead(lm35) * 3.37 / 1023 * 100; // old way of reading the sensor
       int mv = analogReadMilliVolts(lm35); // new way of reading the sensor
-      tempcelsius = mv / 10; // LM35: 10mV per °C
+      tempcelsius = mv / 10.0f; // LM35: 10mV per °C
       smoothlm35 = avglm35.update(tempcelsius);
-      Serial.println(smoothlm35);
-      display.showNumberDecEx(smoothlm35, false, 0, 2, 0);
+      //Serial.println(mv);
+      ////Serial.println(smoothlm35);
+      // lroundf(): rounds a float to the nearest long, avoiding float noise like 255.9999
+      // https://en.cppreference.com/w/cpp/numeric/math/round
+      int tenths = lroundf(smoothlm35 * 10.0f);   // e.g. 25.6 °C -> 256
+      int shownTemp = tenths / 10;                // integer part (25)
+      if (tenths % 10 >= 6) shownTemp++;          // last digit 6+ -> add 1 (25.6 -> 26); 5 or less -> keep (25.5 -> 25)
+      // showNumberDecEx(num, dots, leading_zero, length, pos)
+      // https://github.com/avishorp/TM1637/blob/master/TM1637Display.h
+      display.showNumberDecEx(shownTemp, false, 0, 2, 0);
       display.setSegments(degrees, 1, 2); //Symbol 'º'
       display.setSegments(cletter, 1, 3); //Letter 'C'
     
@@ -239,19 +264,19 @@ bool connectSavedWiFi() {
   prefs.end();
   WiFi.begin(savedSsid.c_str(), savedPass.c_str());
 
-  Serial.print("Connecting");
+  //Serial.print("Connecting");
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
     display.setSegments(dash, 1, 1); //Symbol '-'
     display.setSegments(dash, 1, 2); //Symbol '-'
-    Serial.print(".");
+    //Serial.print(".");
     delay(500);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConnected!");
-    Serial.println(WiFi.localIP());
+    //Serial.println("\nConnected!");
+    //Serial.println(WiFi.localIP());
     return true;
   }
 
@@ -396,7 +421,7 @@ void startAPPortal() {
   // softAP() returns false if the AP could not be started
   // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wifi.html
   bool apOk = WiFi.softAP(networkName);
-  Serial.println(apOk ? "softAP OK" : "softAP FAILED");
+  //Serial.println(apOk ? "softAP OK" : "softAP FAILED");
 
   // Known ESP32-C3 Super Mini issue: at full TX power, stations can fail to
   // associate. The Wi-Fi must already be started, hence after softAP().
@@ -404,8 +429,8 @@ void startAPPortal() {
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
   IPAddress IP = WiFi.softAPIP();
   apIP = IP.toString();
-  Serial.print("AP started. IP: ");
-  Serial.println(IP);
+  //Serial.print("AP started. IP: ");
+  //Serial.println(IP);
 
   server.on("/", handleRoot);
   server.on("/connect", HTTP_POST, handleConnect);
