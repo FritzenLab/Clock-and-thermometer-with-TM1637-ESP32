@@ -20,10 +20,23 @@ const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
 const char* mytz = "<-03>3"; // my time zone
 
+// Thermistor: model B57421V2103,  https://www.tdk-electronics.tdk.com/inf/50/db/ntc/NTC_SMD_Standard_series_0805.pdf 
+// For room temperature, B25/50 = 3940 K
+const double beta = 3940.0;
+const double r0 = 10000.0;
+const double t0 = 273.0 + 25.0;
+const double rx = r0 * exp(-beta/t0);
+ 
+// Parmetros do circuito
+const double vcc = 3.36;
+const double R = 10000.0;
+int rawanalog = 0;
+const float tempOffset = 4.00; // This is based on the readings of two other temp sensors on the same room
+
 // IO naming
 #define CLK 1 // GPIO 1 pin 15
 #define DIO 2 // GPIO 2 pin 14
-#define lm35 4 // GPIO 4 pin A2
+#define lm35 3 // GPIO 3 pin A3
 // On my version of the ESP32C3 Super mini: 10 GND and 11 3V3
 
 const uint8_t cletter[] = {
@@ -100,11 +113,11 @@ class MovingAverage {
 MovingAverage avglm35(20);
 
 void setup() {
-  analogReadResolution(10);
-  analogSetAttenuation(ADC_0db);
+  analogReadResolution(12); // 10 bit for LM35, 12 bit for onboard NTC
+  //analogSetAttenuation(ADC_0db); // used for LM35 only
   display.clear();
   display.setBrightness(0x0f);
-  //Serial.begin(115200); 
+  Serial.begin(115200); 
   
   //Serial.println("[SETUP] WiFi conectado!");
   for (int i = 0; i < 3; i++) {
@@ -186,10 +199,11 @@ void loop() {
       }
 
     }else if(sweepcounter == 50){
-      
-      //tempcelsius= analogRead(lm35) * 3.37 / 1023 * 100; // old way of reading the sensor
+      // old LM35 reading
+      /*//tempcelsius= analogRead(lm35) * 3.37 / 1023 * 100; // old way of reading the sensor
       int mv = analogReadMilliVolts(lm35); // new way of reading the sensor
-      tempcelsius = mv / 10.0f; // LM35: 10mV per °C
+      tempcelsius = mv / 10.0f; // LM35: 10mV per °C*/
+      tempcelsius = readNTC();
       smoothlm35 = avglm35.update(tempcelsius);
       //Serial.println(mv);
       ////Serial.println(smoothlm35);
@@ -435,4 +449,21 @@ void startAPPortal() {
   server.on("/connect", HTTP_POST, handleConnect);
   server.begin();
   portalRunning = true;
+}
+float readNTC(){
+  
+  // analogReadMilliVolts(): pin voltage in mV, already converted using the ADC's factory calibration
+  // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/adc.html
+  rawanalog = analogReadMilliVolts(lm35);   // now mV (not 0-4095), so Serial.println(rawanalog) shows mV
+  double v = rawanalog / 1000.0;            // volts
+  double rt = (vcc*R)/v - R;
+
+  // Calcula a temperatura
+  float t = beta / log(rt/rx);
+  t= t - 273 - tempOffset; // offset is only here because the NTC sensor is a 0805 component
+  // therefore the board (PCB) around it traps the heat, giving me higher readings
+
+  Serial.println(rawanalog);
+  Serial.println(t);
+  return t;
 }
