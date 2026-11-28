@@ -63,6 +63,7 @@ int sweepcounter;
 int lastcounter;
 const char* networkName   = "myClock";
 bool portalRunning     = false;
+volatile uint8_t authFailCount = 0;
 // HTTP server on port 80, used by the configuration portal
 // https://github.com/espressif/arduino-esp32/tree/master/libraries/WebServer
 WebServer server(80);
@@ -112,6 +113,17 @@ class MovingAverage {
 
 MovingAverage avglm35(20);
 
+// Called by the Wi-Fi stack on every event. For a disconnect, the WIFI_REASON_*
+// code is in info.wifi_sta_disconnected.reason
+// https://github.com/espressif/arduino-esp32/blob/master/libraries/WiFi/examples/WiFiClientEvents/WiFiClientEvents.ino
+// Reason code list: https://docs.espressif.com/projects/esp-idf/en/latest/esp32c3/api-guides/wifi.html#wi-fi-reason-code
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    if (info.wifi_sta_disconnected.reason == WIFI_REASON_AUTH_FAIL) authFailCount++;
+  } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    authFailCount = 0;  // got an IP, so the credentials are good
+  }
+}
 void setup() {
   analogReadResolution(12); // 10 bit for LM35, 12 bit for onboard NTC
   //analogSetAttenuation(ADC_0db); // used for LM35 only
@@ -119,30 +131,37 @@ void setup() {
   display.setBrightness(0x0f);
   Serial.begin(115200); 
   
-  //Serial.println("[SETUP] WiFi conectado!");
-  for (int i = 0; i < 3; i++) {
-    if (connectSavedWiFi()) return;
+    // Register the callback before the first WiFi.begin() so no event is missed
+  // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wifi.html
+  WiFi.onEvent(onWiFiEvent);
 
+  // How long to keep retrying when the router simply isn't answering
+  // (WIFI_REASON_NO_AP_FOUND), e.g. clock boots before the router after a power cut.
+  const unsigned long NO_AP_GRACE_MS = 10UL * 60UL * 1000UL;  // 10 minutes
+  unsigned long bootStart = millis();
+  bool connected = false;
+
+  while (!connected) {
+    connected = connectSavedWiFi();
+    if (connected) break;
+    if (authFailCount >= 3) break;                     // router really rejected the password
+    if (millis() - bootStart > NO_AP_GRACE_MS) break;  // network unreachable for too long
     delay(5000);
   }
-  
-  if (connectSavedWiFi()) {
+
+  if (connected) {
     getTime();  // starts SNTP the first time it runs (see getTime)
 
-    // getLocalTime() with a timeout waits for the first SNTP sync, so the
-    // display starts with the right time. Returns false if it times out.
+    // getLocalTime() with a timeout waits for the first SNTP sync
     // https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Time/SimpleTime/SimpleTime.ino
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 10000)) {
-      //Serial.println("\nTime synced!");
       getTime();
-    } else {
-      //Serial.println("NTP sync timed out");
     }
-  }else{
+  } else {
     display.setSegments(dash, 1, 1); //Symbol '-'
     display.setSegments(dash, 1, 2); //Symbol '-'
-    startAPPortal();    
+    startAPPortal();
   }
 }
 
@@ -280,7 +299,7 @@ bool connectSavedWiFi() {
   //Serial.print("Connecting");
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000 && authFailCount < 3) {
     display.setSegments(dash, 1, 1); //Symbol '-'
     display.setSegments(dash, 1, 2); //Symbol '-'
     //Serial.print(".");
