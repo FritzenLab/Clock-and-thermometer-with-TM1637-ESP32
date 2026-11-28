@@ -150,14 +150,7 @@ void setup() {
   }
 
   if (connected) {
-    getTime();  // starts SNTP the first time it runs (see getTime)
-
-    // getLocalTime() with a timeout waits for the first SNTP sync
-    // https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Time/SimpleTime/SimpleTime.ino
-    struct tm timeinfo;
-    if (getLocalTime(&timeinfo, 10000)) {
-      getTime();
-    }
+    
   } else {
     display.setSegments(dash, 1, 1); //Symbol '-'
     display.setSegments(dash, 1, 2); //Symbol '-'
